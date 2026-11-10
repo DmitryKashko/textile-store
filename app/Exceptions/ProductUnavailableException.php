@@ -3,9 +3,8 @@
 namespace App\Exceptions;
 
 use Illuminate\Http\JsonResponse;
-use RuntimeException;
 
-class ProductUnavailableException extends RuntimeException
+class ProductUnavailableException extends OrderException
 {
     public function __construct(public readonly int $productId)
     {
