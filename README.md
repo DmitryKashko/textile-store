@@ -1,59 +1,93 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+# Textile Store API
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+Backend of an online fabric store: catalog with filters and an order flow with stock reservation and wholesale pricing.
 
-## About Laravel
+**Stack:** PHP 8.4, Laravel 12, MySQL 8, Redis (cache + queues), Sanctum, Docker.
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+## Features
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+- **Catalog** — categories and products (material, color, width, price per metre, stock). Filtering by category, material, color and price range, sorting, pagination.
+- **Caching** — product listings are cached in Redis. Instead of deleting keys one by one, the cache uses a version key: any product change bumps the version (`ProductObserver`, after commit), old entries expire by TTL.
+- **Orders** — an order is placed in one transaction: product rows are locked with `SELECT ... FOR UPDATE` in a stable order (no deadlocks between concurrent orders), stock is checked and decremented, prices are taken from the database, product name and price are stored as a snapshot.
+- **Wholesale pricing** — 5% discount from 50 m of one fabric, 10% from 100 m (`PriceCalculator`).
+- **Background jobs** — `OrderPlaced` is dispatched only after the transaction commits; the confirmation email is sent by a queued listener with retries and backoff.
+- **Auth** — token authentication with Sanctum, rate limiting for login and order placement, a policy so users see only their own orders.
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+## Structure
 
-## Learning Laravel
+```
+app/
+├── Data/                 readonly DTOs (ProductFilter, PlaceOrderData, OrderLine)
+├── Enums/                Material, OrderStatus
+├── Events/ Listeners/    OrderPlaced -> SendOrderConfirmation (queued)
+├── Exceptions/           business errors rendered as 422 and not reported
+├── Http/
+│   ├── Controllers/Api/  thin controllers
+│   ├── Requests/         validation + mapping to DTOs
+│   └── Resources/        API responses
+├── Observers/            cache invalidation
+├── Policies/
+├── Repositories/
+│   ├── Contracts/        interfaces used by services
+│   └── Eloquent/         implementations, bound in AppServiceProvider
+└── Services/
+    ├── Catalog/          CatalogService, CatalogCache
+    └── Orders/           OrderService, PriceCalculator
+```
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework. You can also check out [Laravel Learn](https://laravel.com/learn), where you will be guided through building a modern Laravel application.
+Request flow: `Controller -> FormRequest (DTO) -> Service -> Repository`.
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+Money is stored as integers in minor units (kopecks), quantities in whole metres.
 
-## Laravel Sponsors
+## Running
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+```bash
+cp .env.example .env
+docker compose up -d --build
+docker compose exec app php artisan key:generate
+docker compose exec app php artisan migrate --seed
+```
 
-### Premium Partners
+The API is available at `http://localhost:8080/api` (set `APP_PORT` to use another port).
+Seeded user: `demo@example.com` / `password`.
 
-- **[Vehikl](https://vehikl.com)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development)**
-- **[Active Logic](https://activelogic.com)**
+## Tests
 
-## Contributing
+```bash
+docker compose exec app php artisan test
+```
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+Tests run on SQLite in memory and cover catalog filters and caching, order placement (stock, discounts, snapshot, rollback on insufficient stock), validation, auth, policies and the queued listener.
 
-## Code of Conduct
+## API
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| POST | `/api/auth/register` | — | register, returns a token |
+| POST | `/api/auth/login` | — | returns a token |
+| POST | `/api/auth/logout` | token | revoke current token |
+| GET | `/api/categories` | — | list categories |
+| GET | `/api/products` | — | `category_id`, `material`, `color`, `price_from`, `price_to`, `sort` (`newest`, `price_asc`, `price_desc`), `per_page`, `page` |
+| GET | `/api/products/{slug}` | — | product details |
+| GET | `/api/orders` | token | current user's orders |
+| GET | `/api/orders/{id}` | token | order details |
+| POST | `/api/orders` | token | place an order |
 
-## Security Vulnerabilities
+Example:
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+```bash
+curl -X POST http://localhost:8080/api/orders \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"items": [{"product_id": 1, "quantity": 60}, {"product_id": 2, "quantity": 3}]}'
+```
 
-## License
+If there is not enough stock, the whole order is rejected with `422`:
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+```json
+{
+  "message": "Not enough stock.",
+  "errors": { "items": [{ "product_id": 1, "requested": 1000, "available": 292 }] }
+}
+```
